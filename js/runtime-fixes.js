@@ -163,7 +163,7 @@
   const pullFromSheets = async (url, reason = 'manual') => {
     if (!url) return false;
 
-    setStatus('Loading from Google Sheets…', 'loading');
+    setStatus(reason === 'startup' ? 'Loading from Google Sheets…' : 'Loading from Google Sheets…', 'loading');
 
     try {
       const result = await requestJson(`${url}${url.includes('?') ? '&' : '?'}action=getAll`);
@@ -181,7 +181,9 @@
       return true;
     } catch (error) {
       setStatus('Sync failed', 'error');
-      showToast(error.message || 'Could not load data from Google Sheets.', 'error');
+      if (reason !== 'startup') {
+        showToast(error.message || 'Could not load data from Google Sheets.', 'error');
+      }
       return false;
     }
   };
@@ -201,7 +203,6 @@
     const result = await requestJson(url, {
       method: 'POST',
       // Apps Script web apps do not handle the CORS preflight caused by application/json.
-      // text/plain is a CORS-safelisted content type; the Apps Script still parses the JSON body.
       headers: {
         'Content-Type': 'text/plain;charset=utf-8'
       },
@@ -256,18 +257,14 @@
   };
 
   const maybeBindSaveTriggers = () => {
-    const formIds = ['transactionForm', 'budgetForm', 'categoryForm', 'loanForm'];
-    formIds.forEach((id) => {
-      const form = document.getElementById(id);
-      if (!form || form.dataset.boundSyncTriggers) return;
+    if (document.documentElement.dataset.boundSyncTriggers === 'true') return;
+    document.documentElement.dataset.boundSyncTriggers = 'true';
 
-      form.dataset.boundSyncTriggers = 'true';
-      form.addEventListener('submit', () => {
-        const url = getSyncUrl();
-        if (url) {
-          setTimeout(() => syncToGoogleSheets('save'), 250);
-        }
-      });
+    // Delegate so this also catches the transaction form created dynamically by app.js.
+    document.addEventListener('submit', (event) => {
+      if (!['transactionForm', 'budgetForm', 'categoryForm', 'loanForm'].includes(event.target?.id)) return;
+      const url = getSyncUrl();
+      if (url) setTimeout(() => syncToGoogleSheets('save'), 250);
     });
   };
 
@@ -282,15 +279,18 @@
 
     window.syncToGoogleSheets = syncToGoogleSheets;
     window.pullFromGoogleSheets = () => {
-      const url = getSyncUrl() || askForSyncUrl();
-      return url ? pullFromSheets(url, 'manual') : false;
+      const nextUrl = getSyncUrl() || askForSyncUrl();
+      return nextUrl ? pullFromSheets(nextUrl, 'manual') : false;
     };
 
+    // Render localStorage immediately, then refresh from Sheets in the background.
+    if (url) {
+      setTimeout(() => pullFromSheets(url, 'startup'), 0);
+    }
+
     window.addEventListener('moneyflow:state-updated', () => {
-      const url = getSyncUrl();
-      if (url) {
-        setStatus('Data refreshed', 'success');
-      }
+      const nextUrl = getSyncUrl();
+      if (nextUrl) setStatus('Data refreshed', 'success');
     });
   };
 
