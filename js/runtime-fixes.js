@@ -2,299 +2,247 @@
   'use strict';
 
   const STORAGE_KEY = 'moneyflow-v3';
-  const SYNC_STATE_KEY = 'moneyflow-sync-state';
-  let syncInFlight = false;
 
-  const readJson = (key, fallback = {}) => {
+  const readState = () => {
     try {
-      const raw = localStorage.getItem(key);
-      if (raw === null) return fallback;
-      return JSON.parse(raw);
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
     } catch (_) {
-      return fallback;
+      return {};
     }
   };
 
-  const writeJson = (key, value) => {
+  const saveState = (state) => {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (_) {
-      // Ignore write failures in private/incognito modes.
+      // Ignore storage failures.
     }
   };
 
-  const readState = () => readJson(STORAGE_KEY, {});
-  const saveState = (state) => writeJson(STORAGE_KEY, state);
+  const num = (value) => Number(String(value ?? '').replace(/,/g, '')) || 0;
 
-  const getSyncUrl = () => {
-    const state = readState();
-    return String(state?.settings?.syncUrl || '').trim();
-  };
+  const injectSettingsStyles = () => {
+    if (document.getElementById('settings-live-fixes')) return;
 
-  const setSyncUrl = (url) => {
-    const cleaned = String(url || '').trim();
-    const state = readState();
-    state.settings = state.settings || {};
-    state.settings.syncUrl = cleaned;
-    saveState(state);
-    const input = document.getElementById('syncUrl');
-    if (input) input.value = cleaned;
-  };
+    const style = document.createElement('style');
+    style.id = 'settings-live-fixes';
+    style.textContent = `
+      #settings select,
+      #settings input,
+      #settings textarea,
+      #settings .stack-form input,
+      #settings .stack-form select {
+        width: 100%;
+        min-height: 42px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-solid);
+        color: var(--text);
+        color-scheme: inherit;
+        outline: none;
+      }
 
-  const setStatus = (message, tone = 'idle') => {
-    const node = document.getElementById('syncStatus');
-    if (!node) return;
+      body.dark #settings select,
+      body.dark #settings input,
+      body.dark #settings textarea,
+      body.dark #settings .stack-form input,
+      body.dark #settings .stack-form select {
+        background: rgba(7, 11, 22, 0.72);
+        color: var(--text);
+      }
 
-    node.textContent = message;
-    node.dataset.status = tone;
-  };
+      #settings select option {
+        background: var(--surface-solid);
+        color: var(--text);
+      }
 
-  const showToast = (message, tone = 'success') => {
-    const node = document.getElementById('toast');
-    if (!node) return;
+      body.dark #settings select option {
+        background: #0d1424;
+        color: #f2f6ff;
+      }
 
-    node.textContent = message;
-    node.dataset.tone = tone;
-    node.classList.add('on');
+      .settings-action-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
 
-    clearTimeout(showToast.timer);
-    showToast.timer = setTimeout(() => {
-      node.classList.remove('on');
-    }, 2600);
-  };
+      .settings-action-row button,
+      .settings-inline-action {
+        appearance: none;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(148, 163, 184, 0.08);
+        color: var(--text);
+        padding: 0 12px;
+        min-height: 36px;
+        cursor: pointer;
+        transition: border-color 0.18s ease, transform 0.12s ease;
+      }
 
-  const ensureSyncUrlInput = () => {
-    const existing = document.getElementById('syncUrl');
-    if (existing) return existing;
+      .settings-action-row button:hover,
+      .settings-inline-action:hover {
+        border-color: rgba(79, 140, 255, 0.5);
+      }
 
-    const settingsList = document.querySelector('#settings .settings-list');
-    if (!settingsList) return null;
-
-    const row = document.createElement('label');
-    row.className = 'sync-url-row';
-    row.innerHTML = `
-      <span>Google Apps Script URL</span>
-      <input
-        id="syncUrl"
-        type="url"
-        inputmode="url"
-        placeholder="https://script.google.com/macros/s/AK.../exec"
-        autocomplete="url"
-      />
+      .settings-action-row button:active,
+      .settings-inline-action:active {
+        transform: translateY(1px);
+      }
     `;
-
-    settingsList.appendChild(row);
-    return row.querySelector('input');
+    document.head.appendChild(style);
   };
 
-  const wireSyncUrlInput = () => {
-    const input = ensureSyncUrlInput();
-    if (!input || input.dataset.bound === 'true') return;
-
-    input.dataset.bound = 'true';
-    input.value = getSyncUrl();
-
-    input.addEventListener('input', (event) => {
-      const value = String(event.target.value || '').trim();
-      const state = readState();
-      state.settings = state.settings || {};
-      state.settings.syncUrl = value;
-      saveState(state);
-
-      setStatus(value ? 'Ready to sync' : 'Sync URL required', value ? 'idle' : 'warning');
-    });
-  };
-
-  const askForSyncUrl = () => {
-    const current = getSyncUrl();
-    const entered = window.prompt('Enter your Google Apps Script /exec URL', current);
-    if (!entered || !entered.trim()) return '';
-
-    const value = entered.trim();
-    setSyncUrl(value);
-    return value;
-  };
-
-  const requestJson = async (url, options = {}) => {
-    try {
-      const response = await fetch(url, options);
-
-      if (!response.ok) {
-        let errorText = '';
-        try {
-          const body = await response.json();
-          errorText = body?.error || body?.message || '';
-        } catch (_) {}
-        throw new Error(errorText || `Request failed (${response.status})`);
-      }
-
-      const text = await response.text();
-      if (!text) return {};
-      try {
-        return JSON.parse(text);
-      } catch (_) {
-        return { ok: true, raw: text };
-      }
-    } catch (error) {
-      throw new Error(error.message || 'Network request failed');
-    }
-  };
-
-  const applyRemoteData = (remote) => {
-    if (!remote || typeof remote !== 'object') {
-      throw new Error('The sheet returned no data');
-    }
-
+  const updateSelectedBudget = (selectedValue) => {
     const state = readState();
-    const incoming = remote.data || remote;
+    const budgets = Array.isArray(state.budgets) ? state.budgets : [];
+    const item = budgets.find((row) => String(row.id) === String(selectedValue));
+    if (!item) return;
 
-    state.transactions = Array.isArray(incoming.transactions) ? incoming.transactions : [];
-    state.categories = Array.isArray(incoming.categories) && incoming.categories.length
-      ? incoming.categories
-      : (state.categories || []);
-    state.budgets = Array.isArray(incoming.budgets) ? incoming.budgets : [];
-    state.loans = Array.isArray(incoming.loans) ? incoming.loans : [];
+    const nextCategory = window.prompt('Edit budget category', item.category || '');
+    if (nextCategory === null) return;
+
+    const nextMonth = window.prompt('Edit budget month (YYYY-MM)', item.month || '');
+    if (nextMonth === null) return;
+
+    const nextAmount = window.prompt('Edit budget amount', String(item.amount ?? 0));
+    if (nextAmount === null) return;
+
+    const cleanCategory = String(nextCategory).trim();
+    const cleanMonth = String(nextMonth).trim();
+    const cleanAmount = num(nextAmount);
+
+    if (!cleanCategory || !/^\\d{4}-\\d{2}$/.test(cleanMonth) || cleanAmount <= 0) {
+      return;
+    }
+
+    item.category = cleanCategory;
+    item.month = cleanMonth;
+    item.amount = cleanAmount;
 
     saveState(state);
-    window.dispatchEvent(new CustomEvent('moneyflow:state-updated'));
-    return state;
+    window.location.reload();
   };
 
-  const pullFromSheets = async (url, reason = 'manual') => {
-    if (!url) return false;
+  const updateSelectedCategory = (selectedValue) => {
+    const state = readState();
+    const categories = Array.isArray(state.categories) ? state.categories : [];
+    const item = categories.find((row) => String(row.id) === String(selectedValue));
+    if (!item) return;
 
-    setStatus('Loading from Google Sheets…', 'loading');
+    const nextName = window.prompt('Edit category name', item.name || '');
+    if (nextName === null) return;
 
-    try {
-      const result = await requestJson(`${url}${url.includes('?') ? '&' : '?'}action=getAll`);
-      if (!result || result.ok === false) {
-        throw new Error(result?.error || 'Google Sheets did not return valid data.');
-      }
+    const nextType = window.prompt('Edit category type (income or expense)', item.type || 'expense');
+    if (nextType === null) return;
 
-      applyRemoteData(result.data || result);
-      setStatus('Loaded from Google Sheets', 'success');
+    const cleanName = String(nextName).trim();
+    const cleanType = String(nextType).trim().toLowerCase();
 
-      if (reason === 'manual') {
-        showToast('Loaded data from Google Sheets.');
-      }
+    if (!cleanName || !['income', 'expense'].includes(cleanType)) return;
 
-      return true;
-    } catch (error) {
-      setStatus('Sync failed', 'error');
-      showToast(error.message || 'Could not load data from Google Sheets.', 'error');
-      return false;
-    }
+    item.name = cleanName;
+    item.type = cleanType;
+
+    saveState(state);
+    window.location.reload();
   };
 
-  const pushToSheets = async (url, state) => {
-    if (!url) return false;
+  const attachSettingsActions = () => {
+    const settingsPage = document.getElementById('settings');
+    if (!settingsPage) return;
 
-    const payload = {
-      action: 'appendDelta',
-      transactions: Array.isArray(state.transactions) ? state.transactions : [],
-      budgets: Array.isArray(state.budgets) ? state.budgets : [],
-      categories: Array.isArray(state.categories) ? state.categories : [],
-      loans: Array.isArray(state.loans) ? state.loans : [],
-      syncedAt: new Date().toISOString()
-    };
+    injectSettingsStyles();
 
-    const result = await requestJson(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8'
-      },
-      body: JSON.stringify(payload)
-    });
+    const budgetForm = document.getElementById('budgetForm');
+    if (budgetForm && !budgetForm.dataset.runtimeHooked) {
+      budgetForm.dataset.runtimeHooked = 'true';
 
-    if (result && result.ok === false) {
-      throw new Error(result.error || 'Google Sheets sync rejected the payload.');
+      const activeValue = budgetForm.querySelector('#budgetCategory')?.value || '';
+      const buttonRow = document.createElement('div');
+      buttonRow.className = 'settings-action-row';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.textContent = 'Edit selected budget';
+      editBtn.addEventListener('click', () => {
+        const selected = budgetForm.querySelector('#budgetCategory')?.value || '';
+        if (selected) updateSelectedBudget(selected);
+      });
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = 'Delete selected budget';
+      removeBtn.addEventListener('click', () => {
+        const state = readState();
+        const budgets = Array.isArray(state.budgets) ? state.budgets : [];
+        const selected = budgetForm.querySelector('#budgetCategory')?.value || '';
+        const target = budgets.find((row) => String(row.id) === String(selected));
+        if (!target) return;
+
+        const confirmDelete = window.confirm(`Delete budget "${target.category || 'this item'}"?`);
+        if (!confirmDelete) return;
+
+        state.budgets = budgets.filter((row) => String(row.id) !== String(selected));
+        saveState(state);
+        window.location.reload();
+      });
+
+      buttonRow.appendChild(editBtn);
+      buttonRow.appendChild(removeBtn);
+      budgetForm.appendChild(buttonRow);
     }
 
-    return result;
-  };
+    const categoryForm = document.getElementById('categoryForm');
+    if (categoryForm && !categoryForm.dataset.runtimeHooked) {
+      categoryForm.dataset.runtimeHooked = 'true';
 
-  const syncToGoogleSheets = async (reason = 'manual') => {
-    if (syncInFlight) return false;
-    const url = getSyncUrl() || askForSyncUrl();
+      const buttonRow = document.createElement('div');
+      buttonRow.className = 'settings-action-row';
 
-    if (!url) {
-      setStatus('Sync URL required', 'warning');
-      showToast('Add your Google Apps Script URL in Settings.', 'error');
-      return false;
-    }
-
-    syncInFlight = true;
-
-    try {
-      setStatus('Syncing…', 'loading');
-
-      await pushToSheets(url, readState());
-      await pullFromSheets(url, 'silent');
-
-      setStatus('Synced and loaded just now', 'success');
-      if (reason === 'manual') {
-        showToast('Google Sheets sync completed.');
-      }
-      return true;
-    } catch (error) {
-      setStatus('Sync failed', 'error');
-      showToast(error.message || 'Sync failed. Check the Apps Script URL and deployment.', 'error');
-      return false;
-    } finally {
-      syncInFlight = false;
-    }
-  };
-
-  const maybeBindSyncButton = () => {
-    const button = document.getElementById('syncButton');
-    if (button && !button.dataset.boundSync) {
-      button.dataset.boundSync = 'true';
-      button.addEventListener('click', () => syncToGoogleSheets('manual'));
-    }
-  };
-
-  const maybeBindSaveTriggers = () => {
-    const formIds = ['transactionForm', 'budgetForm', 'categoryForm', 'loanForm'];
-    formIds.forEach((id) => {
-      const form = document.getElementById(id);
-      if (!form || form.dataset.boundSyncTriggers) return;
-
-      form.dataset.boundSyncTriggers = 'true';
-      form.addEventListener('submit', () => {
-        const url = getSyncUrl();
-        if (url) {
-          setTimeout(() => syncToGoogleSheets('save'), 250);
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.textContent = 'Edit selected category';
+      editBtn.addEventListener('click', () => {
+        const selected = categoryForm.querySelector('input[name="categoryName"]')?.value || '';
+        const state = readState();
+        const categories = Array.isArray(state.categories) ? state.categories : [];
+        const item = categories.find((row) => String(row.name).toLowerCase() === String(selected).trim().toLowerCase());
+        if (item) {
+          updateSelectedCategory(item.id);
         }
       });
-    });
-  };
 
-  const init = () => {
-    wireSyncUrlInput();
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = 'Delete selected category';
+      removeBtn.addEventListener('click', () => {
+        const state = readState();
+        const selected = categoryForm.querySelector('input[name="categoryName"]')?.value || '';
+        const categories = Array.isArray(state.categories) ? state.categories : [];
+        const target = categories.find((row) => String(row.name).toLowerCase() === String(selected).trim().toLowerCase());
 
-    const url = getSyncUrl();
-    setStatus(url ? 'Ready to sync' : 'Sync URL required', url ? 'idle' : 'warning');
+        if (!target) return;
 
-    maybeBindSyncButton();
-    maybeBindSaveTriggers();
+        const confirmDelete = window.confirm(`Delete category "${target.name || 'this item'}"?`);
+        if (!confirmDelete) return;
 
-    window.syncToGoogleSheets = syncToGoogleSheets;
-    window.pullFromGoogleSheets = () => {
-      const url = getSyncUrl() || askForSyncUrl();
-      return url ? pullFromSheets(url, 'manual') : false;
-    };
+        state.categories = categories.filter((row) => String(row.id) !== String(target.id));
+        saveState(state);
+        window.location.reload();
+      });
 
-    window.addEventListener('moneyflow:state-updated', () => {
-      const url = getSyncUrl();
-      if (url) {
-        setStatus('Data refreshed', 'success');
-      }
-    });
+      buttonRow.appendChild(editBtn);
+      buttonRow.appendChild(removeBtn);
+      categoryForm.appendChild(buttonRow);
+    }
   };
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init, { once: true });
+    document.addEventListener('DOMContentLoaded', attachSettingsActions, { once: true });
   } else {
-    init();
+    attachSettingsActions();
   }
 })();
