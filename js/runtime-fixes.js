@@ -200,8 +200,10 @@
 
     const result = await requestJson(url, {
       method: 'POST',
+      // Apps Script web apps do not handle the CORS preflight caused by application/json.
+      // text/plain is a CORS-safelisted content type; the Apps Script still parses the JSON body.
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'text/plain;charset=utf-8'
       },
       body: JSON.stringify(payload)
     });
