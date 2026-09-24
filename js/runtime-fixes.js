@@ -25,6 +25,17 @@
 
   const readState = () => readJson(STORAGE_KEY, {});
   const saveState = (state) => writeJson(STORAGE_KEY, state);
+  const readSyncState = () => readJson(SYNC_STATE_KEY, {});
+  const saveSyncState = (state) => writeJson(SYNC_STATE_KEY, state);
+
+  // The same sheet payload produces the same fingerprint, so reopening the app
+  // does not rewrite localStorage or trigger a second UI refresh for unchanged data.
+  const dataFingerprint = (data = {}) => JSON.stringify({
+    transactions: Array.isArray(data.transactions) ? data.transactions : [],
+    categories: Array.isArray(data.categories) ? data.categories : [],
+    budgets: Array.isArray(data.budgets) ? data.budgets : [],
+    loans: Array.isArray(data.loans) ? data.loans : []
+  });
 
   const getSyncUrl = () => {
     const state = readState();
@@ -44,7 +55,6 @@
   const setStatus = (message, tone = 'idle') => {
     const node = document.getElementById('syncStatus');
     if (!node) return;
-
     node.textContent = message;
     node.dataset.status = tone;
   };
@@ -52,37 +62,25 @@
   const showToast = (message, tone = 'success') => {
     const node = document.getElementById('toast');
     if (!node) return;
-
     node.textContent = message;
     node.dataset.tone = tone;
     node.classList.add('on');
-
     clearTimeout(showToast.timer);
-    showToast.timer = setTimeout(() => {
-      node.classList.remove('on');
-    }, 2600);
+    showToast.timer = setTimeout(() => node.classList.remove('on'), 2600);
   };
 
   const ensureSyncUrlInput = () => {
     const existing = document.getElementById('syncUrl');
     if (existing) return existing;
-
     const settingsList = document.querySelector('#settings .settings-list');
     if (!settingsList) return null;
-
     const row = document.createElement('label');
     row.className = 'sync-url-row';
     row.innerHTML = `
       <span>Google Apps Script URL</span>
-      <input
-        id="syncUrl"
-        type="url"
-        inputmode="url"
-        placeholder="https://script.google.com/macros/s/AK.../exec"
-        autocomplete="url"
-      />
+      <input id="syncUrl" type="url" inputmode="url"
+        placeholder="https://script.google.com/macros/s/AK.../exec" autocomplete="url" />
     `;
-
     settingsList.appendChild(row);
     return row.querySelector('input');
   };
@@ -90,26 +88,21 @@
   const wireSyncUrlInput = () => {
     const input = ensureSyncUrlInput();
     if (!input || input.dataset.bound === 'true') return;
-
     input.dataset.bound = 'true';
     input.value = getSyncUrl();
-
     input.addEventListener('input', (event) => {
       const value = String(event.target.value || '').trim();
       const state = readState();
       state.settings = state.settings || {};
       state.settings.syncUrl = value;
       saveState(state);
-
       setStatus(value ? 'Ready to sync' : 'Sync URL required', value ? 'idle' : 'warning');
     });
   };
 
   const askForSyncUrl = () => {
-    const current = getSyncUrl();
-    const entered = window.prompt('Enter your Google Apps Script /exec URL', current);
+    const entered = window.prompt('Enter your Google Apps Script /exec URL', getSyncUrl());
     if (!entered || !entered.trim()) return '';
-
     const value = entered.trim();
     setSyncUrl(value);
     return value;
@@ -118,7 +111,6 @@
   const requestJson = async (url, options = {}) => {
     try {
       const response = await fetch(url, options);
-
       if (!response.ok) {
         let errorText = '';
         try {
@@ -127,7 +119,6 @@
         } catch (_) {}
         throw new Error(errorText || `Request failed (${response.status})`);
       }
-
       const text = await response.text();
       if (!text) return {};
       try {
@@ -140,104 +131,78 @@
     }
   };
 
-  const applyRemoteData = (remote) => {
-    if (!remote || typeof remote !== 'object') {
-      throw new Error('The sheet returned no data');
-    }
+  const applyRemoteData = (remote, url) => {
+    if (!remote || typeof remote !== 'object') throw new Error('The sheet returned no data');
+
+    const incoming = remote.data || remote;
+    const fingerprint = dataFingerprint(incoming);
+    const syncState = readSyncState();
+
+    // The sheet is still checked on every startup, but unchanged data is ignored.
+    if (syncState.url === url && syncState.fingerprint === fingerprint) return false;
 
     const state = readState();
-    const incoming = remote.data || remote;
-
     state.transactions = Array.isArray(incoming.transactions) ? incoming.transactions : [];
     state.categories = Array.isArray(incoming.categories) && incoming.categories.length
-      ? incoming.categories
-      : (state.categories || []);
+      ? incoming.categories : (state.categories || []);
     state.budgets = Array.isArray(incoming.budgets) ? incoming.budgets : [];
     state.loans = Array.isArray(incoming.loans) ? incoming.loans : [];
-
     saveState(state);
+    saveSyncState({ url, fingerprint, syncedAt: new Date().toISOString() });
     window.dispatchEvent(new CustomEvent('moneyflow:state-updated'));
-    return state;
+    return true;
   };
 
   const pullFromSheets = async (url, reason = 'manual') => {
     if (!url) return false;
-
-    setStatus(reason === 'startup' ? 'Loading from Google Sheets…' : 'Loading from Google Sheets…', 'loading');
-
+    setStatus('Loading from Google Sheets…', 'loading');
     try {
       const result = await requestJson(`${url}${url.includes('?') ? '&' : '?'}action=getAll`);
-      if (!result || result.ok === false) {
-        throw new Error(result?.error || 'Google Sheets did not return valid data.');
-      }
-
-      applyRemoteData(result.data || result);
-      setStatus('Loaded from Google Sheets', 'success');
-
-      if (reason === 'manual') {
-        showToast('Loaded data from Google Sheets.');
-      }
-
+      if (!result || result.ok === false) throw new Error(result?.error || 'Google Sheets did not return valid data.');
+      const changed = applyRemoteData(result.data || result, url);
+      setStatus(changed ? 'Loaded from Google Sheets' : 'Google Sheets already up to date', 'success');
+      if (reason === 'manual') showToast(changed ? 'Loaded data from Google Sheets.' : 'Data is already up to date.');
       return true;
     } catch (error) {
       setStatus('Sync failed', 'error');
-      if (reason !== 'startup') {
-        showToast(error.message || 'Could not load data from Google Sheets.', 'error');
-      }
+      if (reason !== 'startup') showToast(error.message || 'Could not load data from Google Sheets.', 'error');
       return false;
     }
   };
 
   const pushToSheets = async (url, state) => {
-    if (!url) return false;
-
-    const payload = {
-      action: 'appendDelta',
-      transactions: Array.isArray(state.transactions) ? state.transactions : [],
-      budgets: Array.isArray(state.budgets) ? state.budgets : [],
-      categories: Array.isArray(state.categories) ? state.categories : [],
-      loans: Array.isArray(state.loans) ? state.loans : [],
-      syncedAt: new Date().toISOString()
-    };
-
     const result = await requestJson(url, {
       method: 'POST',
-      // Apps Script web apps do not handle the CORS preflight caused by application/json.
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8'
-      },
-      body: JSON.stringify(payload)
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'appendDelta',
+        transactions: Array.isArray(state.transactions) ? state.transactions : [],
+        budgets: Array.isArray(state.budgets) ? state.budgets : [],
+        categories: Array.isArray(state.categories) ? state.categories : [],
+        loans: Array.isArray(state.loans) ? state.loans : [],
+        syncedAt: new Date().toISOString()
+      })
     });
-
-    if (result && result.ok === false) {
-      throw new Error(result.error || 'Google Sheets sync rejected the payload.');
-    }
-
+    if (result && result.ok === false) throw new Error(result.error || 'Google Sheets sync rejected the payload.');
     return result;
   };
 
   const syncToGoogleSheets = async (reason = 'manual') => {
     if (syncInFlight) return false;
     const url = getSyncUrl() || askForSyncUrl();
-
     if (!url) {
       setStatus('Sync URL required', 'warning');
       showToast('Add your Google Apps Script URL in Settings.', 'error');
       return false;
     }
-
     syncInFlight = true;
-
     try {
       setStatus('Syncing…', 'loading');
-
+      // Every save sends the current local app data, then reads the merged sheet once.
       await pushToSheets(url, readState());
       await pullFromSheets(url, 'silent');
-
       setStatus('Synced and loaded just now', 'success');
-      if (reason === 'manual') {
-        showToast('Google Sheets sync completed.');
-      }
+      if (reason === 'manual') showToast('Google Sheets sync completed.');
       return true;
     } catch (error) {
       setStatus('Sync failed', 'error');
@@ -259,8 +224,7 @@
   const maybeBindSaveTriggers = () => {
     if (document.documentElement.dataset.boundSyncTriggers === 'true') return;
     document.documentElement.dataset.boundSyncTriggers = 'true';
-
-    // Delegate so this also catches the transaction form created dynamically by app.js.
+    // Delegation also catches the transaction form created dynamically by app.js.
     document.addEventListener('submit', (event) => {
       if (!['transactionForm', 'budgetForm', 'categoryForm', 'loanForm'].includes(event.target?.id)) return;
       const url = getSyncUrl();
@@ -270,10 +234,8 @@
 
   const init = () => {
     wireSyncUrlInput();
-
     const url = getSyncUrl();
     setStatus(url ? 'Ready to sync' : 'Sync URL required', url ? 'idle' : 'warning');
-
     maybeBindSyncButton();
     maybeBindSaveTriggers();
 
@@ -283,20 +245,15 @@
       return nextUrl ? pullFromSheets(nextUrl, 'manual') : false;
     };
 
-    // Render localStorage immediately, then refresh from Sheets in the background.
-    if (url) {
-      setTimeout(() => pullFromSheets(url, 'startup'), 0);
-    }
+    // Local data is rendered immediately by app.js. The sheet is checked once in
+    // the background on startup; the fingerprint prevents duplicate replacement.
+    if (url) setTimeout(() => pullFromSheets(url, 'startup'), 0);
 
     window.addEventListener('moneyflow:state-updated', () => {
-      const nextUrl = getSyncUrl();
-      if (nextUrl) setStatus('Data refreshed', 'success');
+      if (getSyncUrl()) setStatus('Data refreshed', 'success');
     });
   };
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init, { once: true });
-  } else {
-    init();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
+  else init();
 })();
