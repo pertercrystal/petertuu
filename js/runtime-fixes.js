@@ -20,6 +20,7 @@
   };
 
   const num = (value) => Number(String(value ?? '').replace(/,/g, '')) || 0;
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char));
 
   const injectSettingsStyles = () => {
     if (document.getElementById('settings-live-fixes')) return;
@@ -63,14 +64,26 @@
       }
 
       .settings-action-row {
-        display: flex;
-        flex-wrap: wrap;
+        display: grid;
         gap: 8px;
         margin-top: 10px;
       }
 
-      .settings-action-row button,
-      .settings-inline-action {
+      .settings-action-row .settings-selector-label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: .85rem;
+        font-weight: 700;
+      }
+
+      .settings-action-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .settings-action-buttons button {
         appearance: none;
         border: 1px solid var(--line);
         border-radius: 10px;
@@ -79,20 +92,52 @@
         padding: 0 12px;
         min-height: 36px;
         cursor: pointer;
-        transition: border-color 0.18s ease, transform 0.12s ease;
       }
 
-      .settings-action-row button:hover,
-      .settings-inline-action:hover {
+      .settings-action-buttons button:hover {
         border-color: rgba(79, 140, 255, 0.5);
       }
 
-      .settings-action-row button:active,
-      .settings-inline-action:active {
-        transform: translateY(1px);
+      .brand-mark {
+        overflow: hidden;
+      }
+
+      .brand-mark img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: inherit;
       }
     `;
     document.head.appendChild(style);
+  };
+
+  const replaceBrandIcon = () => {
+    const mark = document.querySelector('.brand-mark');
+    if (!mark || mark.dataset.iconReady === 'true') return;
+
+    mark.dataset.iconReady = 'true';
+    mark.textContent = '';
+
+    const image = document.createElement('img');
+    image.src = 'icons/icon-192.png';
+    image.alt = 'MoneyFlow';
+    image.width = 38;
+    image.height = 38;
+    mark.appendChild(image);
+  };
+
+  const getBudget = (id) => {
+    const state = readState();
+    return (Array.isArray(state.budgets) ? state.budgets : [])
+      .find((item) => String(item.id) === String(id));
+  };
+
+  const getCategory = (id) => {
+    const state = readState();
+    return (Array.isArray(state.categories) ? state.categories : [])
+      .find((item) => String(item.id) === String(id));
   };
 
   const updateSelectedBudget = (selectedValue) => {
@@ -103,25 +148,19 @@
 
     const nextCategory = window.prompt('Edit budget category', item.category || '');
     if (nextCategory === null) return;
-
     const nextMonth = window.prompt('Edit budget month (YYYY-MM)', item.month || '');
     if (nextMonth === null) return;
-
     const nextAmount = window.prompt('Edit budget amount', String(item.amount ?? 0));
     if (nextAmount === null) return;
 
     const cleanCategory = String(nextCategory).trim();
     const cleanMonth = String(nextMonth).trim();
     const cleanAmount = num(nextAmount);
-
-    if (!cleanCategory || !/^\\d{4}-\\d{2}$/.test(cleanMonth) || cleanAmount <= 0) {
-      return;
-    }
+    if (!cleanCategory || !/^\d{4}-\d{2}$/.test(cleanMonth) || cleanAmount <= 0) return;
 
     item.category = cleanCategory;
     item.month = cleanMonth;
     item.amount = cleanAmount;
-
     saveState(state);
     window.location.reload();
   };
@@ -134,20 +173,54 @@
 
     const nextName = window.prompt('Edit category name', item.name || '');
     if (nextName === null) return;
-
     const nextType = window.prompt('Edit category type (income or expense)', item.type || 'expense');
     if (nextType === null) return;
 
     const cleanName = String(nextName).trim();
     const cleanType = String(nextType).trim().toLowerCase();
-
     if (!cleanName || !['income', 'expense'].includes(cleanType)) return;
+    if (categories.some((row) => row !== item && String(row.name || '').toLowerCase() === cleanName.toLowerCase())) return;
 
     item.name = cleanName;
     item.type = cleanType;
-
     saveState(state);
     window.location.reload();
+  };
+
+  const deleteSelectedBudget = (selectedValue) => {
+    const state = readState();
+    const budgets = Array.isArray(state.budgets) ? state.budgets : [];
+    const target = budgets.find((row) => String(row.id) === String(selectedValue));
+    if (!target || !window.confirm(`Delete budget "${target.category || 'this item'}"?`)) return;
+    state.budgets = budgets.filter((row) => String(row.id) !== String(selectedValue));
+    saveState(state);
+    window.location.reload();
+  };
+
+  const deleteSelectedCategory = (selectedValue) => {
+    const state = readState();
+    const categories = Array.isArray(state.categories) ? state.categories : [];
+    const target = categories.find((row) => String(row.id) === String(selectedValue));
+    if (!target || !window.confirm(`Delete category "${target.name || 'this item'}"?`)) return;
+    state.categories = categories.filter((row) => String(row.id) !== String(selectedValue));
+    saveState(state);
+    window.location.reload();
+  };
+
+  const createSelector = (id, label, options, emptyText) => {
+    const labelNode = document.createElement('label');
+    labelNode.className = 'settings-selector-label';
+    labelNode.htmlFor = id;
+    labelNode.textContent = label;
+
+    const select = document.createElement('select');
+    select.id = id;
+    select.innerHTML = options.length
+      ? options
+      : `<option value="">${emptyText}</option>`;
+
+    labelNode.appendChild(select);
+    return { labelNode, select };
   };
 
   const attachSettingsActions = () => {
@@ -155,88 +228,74 @@
     if (!settingsPage) return;
 
     injectSettingsStyles();
+    replaceBrandIcon();
+
+    const state = readState();
+    const budgets = Array.isArray(state.budgets) ? state.budgets : [];
+    const categories = Array.isArray(state.categories) ? state.categories : [];
 
     const budgetForm = document.getElementById('budgetForm');
     if (budgetForm && !budgetForm.dataset.runtimeHooked) {
       budgetForm.dataset.runtimeHooked = 'true';
+      const row = document.createElement('div');
+      row.className = 'settings-action-row';
 
-      const activeValue = budgetForm.querySelector('#budgetCategory')?.value || '';
-      const buttonRow = document.createElement('div');
-      buttonRow.className = 'settings-action-row';
+      const budgetSelector = createSelector(
+        'budgetEditSelect',
+        'Select budget to edit or delete',
+        budgets.map((item) => `<option value="${esc(item.id)}">${esc(item.category)} · ${esc(item.month)} · ${num(item.amount).toLocaleString()} MMK</option>`),
+        'No budgets available'
+      );
+      row.appendChild(budgetSelector.labelNode);
 
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.textContent = 'Edit selected budget';
-      editBtn.addEventListener('click', () => {
-        const selected = budgetForm.querySelector('#budgetCategory')?.value || '';
-        if (selected) updateSelectedBudget(selected);
-      });
+      const buttons = document.createElement('div');
+      buttons.className = 'settings-action-buttons';
 
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.textContent = 'Delete selected budget';
-      removeBtn.addEventListener('click', () => {
-        const state = readState();
-        const budgets = Array.isArray(state.budgets) ? state.budgets : [];
-        const selected = budgetForm.querySelector('#budgetCategory')?.value || '';
-        const target = budgets.find((row) => String(row.id) === String(selected));
-        if (!target) return;
+      const editButton = document.createElement('button');
+      editButton.type = 'button';
+      editButton.textContent = 'Edit selected budget';
+      editButton.addEventListener('click', () => updateSelectedBudget(budgetSelector.select.value));
 
-        const confirmDelete = window.confirm(`Delete budget "${target.category || 'this item'}"?`);
-        if (!confirmDelete) return;
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.textContent = 'Delete selected budget';
+      deleteButton.addEventListener('click', () => deleteSelectedBudget(budgetSelector.select.value));
 
-        state.budgets = budgets.filter((row) => String(row.id) !== String(selected));
-        saveState(state);
-        window.location.reload();
-      });
-
-      buttonRow.appendChild(editBtn);
-      buttonRow.appendChild(removeBtn);
-      budgetForm.appendChild(buttonRow);
+      buttons.append(editButton, deleteButton);
+      row.appendChild(buttons);
+      budgetForm.appendChild(row);
     }
 
     const categoryForm = document.getElementById('categoryForm');
     if (categoryForm && !categoryForm.dataset.runtimeHooked) {
       categoryForm.dataset.runtimeHooked = 'true';
+      const row = document.createElement('div');
+      row.className = 'settings-action-row';
 
-      const buttonRow = document.createElement('div');
-      buttonRow.className = 'settings-action-row';
+      const categorySelector = createSelector(
+        'categoryEditSelect',
+        'Select category to edit or delete',
+        categories.map((item) => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.type)}</option>`),
+        'No categories available'
+      );
+      row.appendChild(categorySelector.labelNode);
 
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.textContent = 'Edit selected category';
-      editBtn.addEventListener('click', () => {
-        const selected = categoryForm.querySelector('input[name="categoryName"]')?.value || '';
-        const state = readState();
-        const categories = Array.isArray(state.categories) ? state.categories : [];
-        const item = categories.find((row) => String(row.name).toLowerCase() === String(selected).trim().toLowerCase());
-        if (item) {
-          updateSelectedCategory(item.id);
-        }
-      });
+      const buttons = document.createElement('div');
+      buttons.className = 'settings-action-buttons';
 
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.textContent = 'Delete selected category';
-      removeBtn.addEventListener('click', () => {
-        const state = readState();
-        const selected = categoryForm.querySelector('input[name="categoryName"]')?.value || '';
-        const categories = Array.isArray(state.categories) ? state.categories : [];
-        const target = categories.find((row) => String(row.name).toLowerCase() === String(selected).trim().toLowerCase());
+      const editButton = document.createElement('button');
+      editButton.type = 'button';
+      editButton.textContent = 'Edit selected category';
+      editButton.addEventListener('click', () => updateSelectedCategory(categorySelector.select.value));
 
-        if (!target) return;
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.textContent = 'Delete selected category';
+      deleteButton.addEventListener('click', () => deleteSelectedCategory(categorySelector.select.value));
 
-        const confirmDelete = window.confirm(`Delete category "${target.name || 'this item'}"?`);
-        if (!confirmDelete) return;
-
-        state.categories = categories.filter((row) => String(row.id) !== String(target.id));
-        saveState(state);
-        window.location.reload();
-      });
-
-      buttonRow.appendChild(editBtn);
-      buttonRow.appendChild(removeBtn);
-      categoryForm.appendChild(buttonRow);
+      buttons.append(editButton, deleteButton);
+      row.appendChild(buttons);
+      categoryForm.appendChild(row);
     }
   };
 
